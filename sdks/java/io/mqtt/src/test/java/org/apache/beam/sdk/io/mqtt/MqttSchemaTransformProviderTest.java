@@ -71,8 +71,8 @@ public class MqttSchemaTransformProviderTest {
 
   @Test(timeout = 30 * 1000)
   public void testReceiveWithTimeoutAndNoData() {
-    MqttReadSchemaTransformProvider.ReadConfiguration readConfiguration =
-        MqttReadSchemaTransformProvider.ReadConfiguration.builder()
+    ReadConfiguration readConfiguration =
+        ReadConfiguration.builder()
             .setConnectionConfiguration(
                 MqttIO.ConnectionConfiguration.create("tcp://localhost:" + port, "READ_TOPIC")
                     .withClientId("READ_PIPELINE"))
@@ -119,8 +119,8 @@ public class MqttSchemaTransformProviderTest {
       data.add(("Test " + i).getBytes(StandardCharsets.UTF_8));
     }
 
-    MqttWriteSchemaTransformProvider.WriteConfiguration writeConfiguration =
-        MqttWriteSchemaTransformProvider.WriteConfiguration.builder()
+    WriteConfiguration writeConfiguration =
+        WriteConfiguration.builder()
             .setConnectionConfiguration(
                 MqttIO.ConnectionConfiguration.create("tcp://localhost:" + port, "WRITE_TOPIC"))
             .build();

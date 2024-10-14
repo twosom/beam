@@ -221,8 +221,10 @@ public class MqttIO {
     @SchemaFieldDescription("The client ID prefix, which is used to construct a unique client ID.")
     abstract @Nullable String getClientId();
 
+    @SchemaFieldDescription("The username for authentication with the MQTT broker.")
     abstract @Nullable String getUsername();
 
+    @SchemaFieldDescription("The password for authentication with the MQTT broker.")
     abstract @Nullable String getPassword();
 
     abstract Builder builder();

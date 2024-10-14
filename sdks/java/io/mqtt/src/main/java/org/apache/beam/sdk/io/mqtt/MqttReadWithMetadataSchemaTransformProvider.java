@@ -18,37 +18,39 @@
 package org.apache.beam.sdk.io.mqtt;
 
 import com.google.auto.service.AutoService;
+import org.apache.beam.sdk.schemas.NoSuchSchemaException;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.transforms.SchemaTransform;
 import org.apache.beam.sdk.schemas.transforms.SchemaTransformProvider;
 import org.apache.beam.sdk.schemas.transforms.TypedSchemaTransformProvider;
-import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.MapElements;
+import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionRowTuple;
 import org.apache.beam.sdk.values.Row;
+import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions;
 import org.joda.time.Duration;
 
 @AutoService(SchemaTransformProvider.class)
-public class MqttReadSchemaTransformProvider
+public class MqttReadWithMetadataSchemaTransformProvider
     extends TypedSchemaTransformProvider<ReadConfiguration> {
 
   @Override
   public String identifier() {
-    return "beam:schematransform:org.apache.beam:mqtt_read:v1";
+    return "beam:schematransform:org.apache.beam:mqtt_read_with_metadata:v1";
   }
 
   @Override
   protected SchemaTransform from(ReadConfiguration configuration) {
-    return new MqttReadSchemaTransform(configuration);
+    return new MqttReadWithMetadataSchemaTransform(configuration);
   }
 
-  private static class MqttReadSchemaTransform extends SchemaTransform {
+  private static class MqttReadWithMetadataSchemaTransform extends SchemaTransform {
     private final ReadConfiguration config;
 
-    MqttReadSchemaTransform(ReadConfiguration configuration) {
-      this.config = configuration;
+    private MqttReadWithMetadataSchemaTransform(ReadConfiguration config) {
+      this.config = config;
     }
 
     @Override
@@ -58,35 +60,34 @@ public class MqttReadSchemaTransformProvider
           "Expected zero input PCollections for this source, but found: %",
           input.getAll().keySet());
 
-      MqttIO.Read<byte[]> readTransform =
-          MqttIO.read().withConnectionConfiguration(config.getConnectionConfiguration());
+      MqttIO.Read<MqttRecord> readWithMetadataTransform =
+          MqttIO.readWithMetadata()
+              .withConnectionConfiguration(config.getConnectionConfiguration());
 
       Long maxRecords = config.getMaxNumRecords();
       Long maxReadTime = config.getMaxReadTimeSeconds();
       if (maxRecords != null) {
-        readTransform = readTransform.withMaxNumRecords(maxRecords);
+        readWithMetadataTransform = readWithMetadataTransform.withMaxNumRecords(maxRecords);
       }
       if (maxReadTime != null) {
-        readTransform = readTransform.withMaxReadTime(Duration.standardSeconds(maxReadTime));
+        readWithMetadataTransform =
+            readWithMetadataTransform.withMaxReadTime(Duration.standardSeconds(maxReadTime));
       }
 
-      Schema outputSchema = Schema.builder().addByteArrayField("bytes").build();
+      Schema outputSchema;
+      SerializableFunction<MqttRecord, Row> toRowFn;
+      try {
+        outputSchema = input.getPipeline().getSchemaRegistry().getSchema(MqttRecord.class);
+        toRowFn = input.getPipeline().getSchemaRegistry().getToRowFunction(MqttRecord.class);
+      } catch (NoSuchSchemaException e) {
+        throw new RuntimeException(e);
+      }
 
-      PCollection<Row> outputRows =
+      final PCollection<Row> outputRows =
           input
               .getPipeline()
-              .apply(readTransform)
-              .apply(
-                  "Wrap in Beam Rows",
-                  ParDo.of(
-                      new DoFn<byte[], Row>() {
-                        @ProcessElement
-                        public void processElement(
-                            @Element byte[] data, OutputReceiver<Row> outputReceiver) {
-                          outputReceiver.output(
-                              Row.withSchema(outputSchema).addValue(data).build());
-                        }
-                      }))
+              .apply(readWithMetadataTransform)
+              .apply("Wrap in Beam Rows", MapElements.into(TypeDescriptors.rows()).via(toRowFn))
               .setRowSchema(outputSchema);
 
       return PCollectionRowTuple.of("output", outputRows);

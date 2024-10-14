@@ -17,72 +17,57 @@
  */
 package org.apache.beam.sdk.io.mqtt;
 
-import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkState;
+import static org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.auto.service.AutoService;
-import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.transforms.SchemaTransform;
 import org.apache.beam.sdk.schemas.transforms.SchemaTransformProvider;
 import org.apache.beam.sdk.schemas.transforms.TypedSchemaTransformProvider;
-import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.SerializableFunction;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionRowTuple;
 import org.apache.beam.sdk.values.Row;
 
 @AutoService(SchemaTransformProvider.class)
-public class MqttWriteSchemaTransformProvider
+public class MqttDynamicWriteSchemaTransformProvider
     extends TypedSchemaTransformProvider<WriteConfiguration> {
-
   @Override
   public String identifier() {
-    return "beam:schematransform:org.apache.beam:mqtt_write:v1";
+    return "beam:schematransform:org.apache.beam:mqtt_dynamic_write:v1";
   }
 
   @Override
   protected SchemaTransform from(WriteConfiguration configuration) {
-    return new MqttWriteSchemaTransform(configuration);
+    return new MqttDynamicWriteSchemaTransform(configuration);
   }
 
-  private static class MqttWriteSchemaTransform extends SchemaTransform {
+  private static class MqttDynamicWriteSchemaTransform extends SchemaTransform {
     private final WriteConfiguration config;
 
-    MqttWriteSchemaTransform(WriteConfiguration configuration) {
-      this.config = configuration;
+    private MqttDynamicWriteSchemaTransform(WriteConfiguration config) {
+      this.config = config;
     }
 
     @Override
     public PCollectionRowTuple expand(PCollectionRowTuple input) {
       PCollection<Row> inputRows = input.getSinglePCollection();
 
-      // TODO validate payloadFn, topicFn?
-      checkState(
-          inputRows.getSchema().getFieldCount() == 1
-              && inputRows.getSchema().getField(0).getType().equals(Schema.FieldType.BYTES),
-          "Expected only one Schema field containing bytes, but instead received: %s",
-          inputRows.getSchema());
+      SerializableFunction<Row, byte[]> payloadFn =
+          checkNotNull(config.getPayloadFn(), "payload_fn can not be null");
+      SerializableFunction<Row, String> topicFn =
+          checkNotNull(config.getTopicFn(), "topic_fn can not be null");
 
-      MqttIO.Write<byte[]> writeTransform =
-          MqttIO.write().withConnectionConfiguration(config.getConnectionConfiguration());
+      MqttIO.Write<Row> dynamicWriteTransform =
+          MqttIO.<Row>dynamicWrite()
+              .withConnectionConfiguration(config.getConnectionConfiguration())
+              .withTopicFn(topicFn)
+              .withPayloadFn(payloadFn);
+
       Boolean retained = config.getRetained();
       if (retained != null) {
-        writeTransform = writeTransform.withRetained(retained);
+        dynamicWriteTransform = dynamicWriteTransform.withRetained(retained);
       }
-
-      inputRows
-          .apply(
-              "Extract bytes",
-              ParDo.of(
-                  new DoFn<Row, byte[]>() {
-                    @ProcessElement
-                    public void processElement(
-                        @Element Row row, OutputReceiver<byte[]> outputReceiver) {
-                      outputReceiver.output(
-                          org.apache.beam.sdk.util.Preconditions.checkStateNotNull(
-                              row.getBytes(0)));
-                    }
-                  }))
-          .apply(writeTransform);
+      inputRows.apply(dynamicWriteTransform);
 
       return PCollectionRowTuple.empty(inputRows.getPipeline());
     }
