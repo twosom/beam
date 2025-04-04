@@ -24,15 +24,18 @@ import static org.hamcrest.Matchers.hasItem;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.util.HashMap;
 import org.apache.beam.runners.spark.StreamingTest;
 import org.apache.beam.runners.spark.TestSparkPipelineOptions;
 import org.apache.beam.runners.spark.TestSparkRunner;
 import org.apache.beam.runners.spark.UsesCheckpointRecovery;
-import org.apache.beam.runners.spark.io.MicrobatchSource;
 import org.apache.beam.runners.spark.metrics.MetricsAccumulator;
 import org.apache.beam.runners.spark.util.GlobalWatermarkHolder;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
+import org.apache.beam.sdk.coders.NullableCoder;
+import org.apache.beam.sdk.coders.VarLongCoder;
+import org.apache.beam.sdk.coders.VoidCoder;
 import org.apache.beam.sdk.io.GenerateSequence;
 import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.DistributionResult;
@@ -40,11 +43,22 @@ import org.apache.beam.sdk.metrics.MetricNameFilter;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.metrics.MetricsFilter;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
+import org.apache.beam.sdk.testing.PAssert;
+import org.apache.beam.sdk.transforms.Combine;
+import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.Flatten;
+import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.View;
 import org.apache.beam.sdk.transforms.WithTimestamps;
+import org.apache.beam.sdk.transforms.windowing.AfterPane;
+import org.apache.beam.sdk.transforms.windowing.Repeatedly;
+import org.apache.beam.sdk.transforms.windowing.Window;
+import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PCollectionView;
+import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.MoreObjects;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Optional;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
@@ -56,6 +70,7 @@ import org.junit.experimental.categories.Category;
 import org.junit.rules.TemporaryFolder;
 
 /** Test suite for {@link StreamingTransformTranslator}. */
+@SuppressWarnings("unused")
 public class StreamingTransformTranslatorTest implements Serializable {
 
   @Rule public transient TemporaryFolder temporaryFolder = new TemporaryFolder();
@@ -163,6 +178,70 @@ public class StreamingTransformTranslatorTest implements Serializable {
                     DistributionResult.create(66, 12, 0, 11)))));
   }
 
+  private static class MovingSideInputValue extends PTransform<PBegin, PCollectionView<Long>> {
+
+    @Override
+    public PCollectionView<Long> expand(PBegin input) {
+      return input
+          .getPipeline()
+          .apply("Gen Seq", GenerateSequence.from(0).withRate(3, Duration.standardSeconds(10)))
+          .apply(
+              Window.<Long>configure()
+                  .withAllowedLateness(Duration.ZERO)
+                  .triggering(Repeatedly.forever(AfterPane.elementCountAtLeast(1)))
+                  .withAllowedLateness(Duration.ZERO)
+                  .discardingFiredPanes())
+          .setCoder(NullableCoder.of(VarLongCoder.of()))
+          .apply(
+              "To Side Input", Combine.<Long>globally(MoreObjects::firstNonNull).asSingletonView());
+    }
+  }
+
+  @Test
+  public void testStreamingSideInput() {
+    TestSparkPipelineOptions options =
+        PipelineOptionsFactory.create().as(TestSparkPipelineOptions.class);
+    options.setSparkMaster("local[*]");
+    options.setRunner(TestSparkRunner.class);
+    //    options.setStopPipelineWatermark(Duration.standardSeconds(1L).getMillis());
+    p = Pipeline.create(options);
+
+    final PCollectionView<Long> streamingSideInput =
+        p.apply("Generate Moving Side Input", new MovingSideInputValue());
+
+    final PCollectionView<String> singletonSideInput =
+        p.apply("Single-Ton Side Input", Create.of("some-value")).apply(View.asSingleton());
+
+    final HashMap<String, PCollectionView<?>> sideInputMap = new HashMap<>();
+    sideInputMap.put("streaming", streamingSideInput);
+    sideInputMap.put("singleton", singletonSideInput);
+
+    p.apply("Another Gen Seq", GenerateSequence.from(0).withRate(10, Duration.standardSeconds(3)))
+        .apply(
+            "Just Print",
+            ParDo.of(
+                    new DoFn<Long, Void>() {
+                      @ProcessElement
+                      public void process(
+                          @SideInput("streaming") Long sideInput,
+                          @SideInput("singleton") String singleton,
+                          @Element Long element) {
+                        System.out.println(
+                            "Element = "
+                                + element
+                                + ", Streaming Side Input = "
+                                + sideInput
+                                + ", Singleton Side Input = "
+                                + singleton);
+                      }
+                    })
+                .withSideInputs(sideInputMap))
+//                .withSideInput("singleton", singletonSideInput))
+    ;
+
+    p.run();
+  }
+
   /** Restarts the pipeline from checkpoint. Sets pipeline to stop after 1 second. */
   private PipelineResult runAgain() {
     return run(
@@ -205,6 +284,66 @@ public class StreamingTransformTranslatorTest implements Serializable {
     return p.run();
   }
 
+  @Test
+  public void testSideInputWithNestedIterables() {
+
+    TestSparkPipelineOptions options =
+        PipelineOptionsFactory.create().as(TestSparkPipelineOptions.class);
+    options.setSparkMaster("local[*]");
+    options.setRunner(TestSparkRunner.class);
+    options.setCheckpointDir(temporaryFolder.getRoot().getPath());
+
+    p = Pipeline.create(options);
+
+    final PCollectionView<Iterable<Integer>> view1 =
+        p.apply("CreateVoid1", Create.of((Void) null).withCoder(VoidCoder.of()))
+            .apply(
+                "OutputOneInteger",
+                ParDo.of(
+                    new DoFn<Void, Integer>() {
+                      @ProcessElement
+                      public void processElement(ProcessContext c) {
+                        c.output(17);
+                      }
+                    }))
+            .apply("View1", View.asIterable());
+
+    final PCollectionView<Iterable<Iterable<Integer>>> view2 =
+        p.apply("CreateVoid2", Create.of((Void) null).withCoder(VoidCoder.of()))
+            .apply(
+                "OutputSideInput",
+                ParDo.of(
+                        new DoFn<Void, Iterable<Integer>>() {
+                          @ProcessElement
+                          public void processElement(ProcessContext c) {
+                            c.output(c.sideInput(view1));
+                          }
+                        })
+                    .withSideInputs(view1))
+            .apply("View2", View.asIterable());
+
+    PCollection<Integer> output =
+        p.apply("CreateVoid3", Create.of((Void) null).withCoder(VoidCoder.of()))
+            .apply(
+                "ReadIterableSideInput",
+                ParDo.of(
+                        new DoFn<Void, Integer>() {
+                          @ProcessElement
+                          public void processElement(ProcessContext c) {
+                            for (Iterable<Integer> input : c.sideInput(view2)) {
+                              for (Integer i : input) {
+                                c.output(i);
+                              }
+                            }
+                          }
+                        })
+                    .withSideInputs(view2));
+
+    PAssert.that(output).containsInAnyOrder(17);
+
+    p.run();
+  }
+
   /**
    * Cleans up accumulated state between test runs. Clears metrics, watermarks, and microbatch
    * source cache.
@@ -213,7 +352,7 @@ public class StreamingTransformTranslatorTest implements Serializable {
   public void clean() {
     MetricsAccumulator.clear();
     GlobalWatermarkHolder.clear();
-    MicrobatchSource.clearCache();
+    //    MicrobatchSource.clearCache();
   }
 
   /**

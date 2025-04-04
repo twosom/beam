@@ -132,7 +132,7 @@ def portableValidatesRunnerTask(String name, boolean streaming, boolean docker, 
         excludeCategories 'org.apache.beam.sdk.testing.UsesBundleFinalizer'
         // Currently unsupported in portable streaming:
         // TODO (https://github.com/apache/beam/issues/20395)
-        excludeCategories 'org.apache.beam.sdk.testing.UsesSideInputs'
+//        excludeCategories 'org.apache.beam.sdk.testing.UsesSideInputs'
         // TODO (https://github.com/apache/beam/issues/20396)
         excludeCategories 'org.apache.beam.sdk.testing.UsesStatefulParDo'
         // TODO (https://github.com/apache/beam/issues/20397)

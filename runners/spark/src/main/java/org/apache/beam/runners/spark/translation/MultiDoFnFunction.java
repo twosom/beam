@@ -26,6 +26,7 @@ import org.apache.beam.runners.core.DoFnRunner;
 import org.apache.beam.runners.core.DoFnRunners;
 import org.apache.beam.runners.core.InMemoryStateInternals;
 import org.apache.beam.runners.core.InMemoryTimerInternals;
+import org.apache.beam.runners.core.SideInputReader;
 import org.apache.beam.runners.core.StateInternals;
 import org.apache.beam.runners.core.StepContext;
 import org.apache.beam.runners.core.TimerInternals;
@@ -66,6 +67,7 @@ public class MultiDoFnFunction<InputT, OutputT>
   private final MetricsContainerStepMapAccumulator metricsAccum;
   private final String stepName;
   private final DoFn<InputT, OutputT> doFn;
+  private final boolean useStreamingSideInput;
   private transient boolean wasSetupCalled;
   private final SerializablePipelineOptions options;
   private final TupleTag<OutputT> mainOutputTag;
@@ -106,7 +108,8 @@ public class MultiDoFnFunction<InputT, OutputT>
       boolean stateful,
       DoFnSchemaInformation doFnSchemaInformation,
       Map<String, PCollectionView<?>> sideInputMapping,
-      boolean useBoundedConcurrentOutput) {
+      boolean useBoundedConcurrentOutput,
+      boolean useStreamingSideInput) {
     this.metricsAccum = metricsAccum;
     this.stepName = stepName;
     this.doFn = SerializableUtils.clone(doFn);
@@ -121,6 +124,7 @@ public class MultiDoFnFunction<InputT, OutputT>
     this.doFnSchemaInformation = doFnSchemaInformation;
     this.sideInputMapping = sideInputMapping;
     this.useBoundedConcurrentOutput = useBoundedConcurrentOutput;
+    this.useStreamingSideInput = useStreamingSideInput;
   }
 
   @Override
@@ -178,7 +182,7 @@ public class MultiDoFnFunction<InputT, OutputT>
         DoFnRunners.simpleRunner(
             options.get(),
             doFn,
-            CachedSideInputReader.of(new SparkSideInputReader(sideInputs)),
+            this.getSideInputReader(),
             processor.getOutputManager(),
             mainOutputTag,
             additionalOutputTags,
@@ -201,6 +205,21 @@ public class MultiDoFnFunction<InputT, OutputT>
             stateful ? new TimerDataIterator(timerInternals) : Collections.emptyIterator());
 
     return processor.createOutputIterator(iter, ctx);
+  }
+
+  /**
+   * Creates and returns a {@link SideInputReader} based on the configuration.
+   *
+   * <p>If streaming side inputs are enabled, returns a direct {@link SparkSideInputReader}.
+   * Otherwise, returns a cached version of the side input reader using {@link
+   * CachedSideInputReader} for better performance in batch processing.
+   *
+   * @return A {@link SideInputReader} instance appropriate for the current configuration
+   */
+  private SideInputReader getSideInputReader() {
+    return this.useStreamingSideInput
+        ? new SparkSideInputReader(this.sideInputs)
+        : CachedSideInputReader.of(new SparkSideInputReader(this.sideInputs));
   }
 
   private static class TimerDataIterator implements Iterator<TimerInternals.TimerData> {

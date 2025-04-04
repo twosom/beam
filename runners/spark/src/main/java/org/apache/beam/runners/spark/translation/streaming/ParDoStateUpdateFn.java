@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 import org.apache.beam.runners.core.DoFnRunner;
 import org.apache.beam.runners.core.DoFnRunners;
+import org.apache.beam.runners.core.SideInputReader;
 import org.apache.beam.runners.core.StateInternals;
 import org.apache.beam.runners.core.StatefulDoFnRunner;
 import org.apache.beam.runners.core.StepContext;
@@ -109,6 +110,8 @@ public class ParDoStateUpdateFn<KeyT, ValueT, InputT extends KV<KeyT, ValueT>, O
   private final Map<Integer, GlobalWatermarkHolder.SparkWatermarks> watermarks;
   private final List<Integer> sourceIds;
   private final TimerInternals.TimerDataCoderV2 timerDataCoder;
+  // for sideInput
+  private final boolean useStreamingSideInput;
 
   public ParDoStateUpdateFn(
       MetricsContainerStepMapAccumulator metricsAccum,
@@ -126,7 +129,8 @@ public class ParDoStateUpdateFn<KeyT, ValueT, InputT extends KV<KeyT, ValueT>, O
       DoFnSchemaInformation doFnSchemaInformation,
       Map<String, PCollectionView<?>> sideInputMapping,
       Map<Integer, GlobalWatermarkHolder.SparkWatermarks> watermarks,
-      List<Integer> sourceIds) {
+      List<Integer> sourceIds,
+      boolean useStreamingSideInput) {
     this.metricsAccum = metricsAccum;
     this.stepName = stepName;
     this.doFn = SerializableUtils.clone(doFn);
@@ -145,6 +149,7 @@ public class ParDoStateUpdateFn<KeyT, ValueT, InputT extends KV<KeyT, ValueT>, O
     this.sourceIds = sourceIds;
     this.timerDataCoder =
         TimerInternals.TimerDataCoderV2.of(windowingStrategy.getWindowFn().windowCoder());
+    this.useStreamingSideInput = useStreamingSideInput;
   }
 
   @Override
@@ -199,7 +204,7 @@ public class ParDoStateUpdateFn<KeyT, ValueT, InputT extends KV<KeyT, ValueT>, O
         DoFnRunners.simpleRunner(
             options.get(),
             doFn,
-            CachedSideInputReader.of(new SparkSideInputReader(sideInputs)),
+            this.getSideInputReader(),
             processor.getOutputManager(),
             (TupleTag<OutputT>) mainOutputTag,
             additionalOutputTags,
@@ -262,5 +267,20 @@ public class ParDoStateUpdateFn<KeyT, ValueT, InputT extends KV<KeyT, ValueT>, O
                           CoderHelpers.toByteArray((WindowedValue) e._2(), outputWindowCoder));
                     })
                 .collect(Collectors.toList());
+  }
+
+  /**
+   * Creates and returns a {@link SideInputReader} based on the configuration.
+   *
+   * <p>If streaming side inputs are enabled, returns a direct {@link SparkSideInputReader}.
+   * Otherwise, returns a cached version of the side input reader using {@link
+   * CachedSideInputReader} for better performance in batch processing.
+   *
+   * @return A {@link SideInputReader} instance appropriate for the current configuration
+   */
+  private SideInputReader getSideInputReader() {
+    return this.useStreamingSideInput
+        ? new SparkSideInputReader(this.sideInputs)
+        : CachedSideInputReader.of(new SparkSideInputReader(this.sideInputs));
   }
 }
